@@ -1,0 +1,5 @@
+#!/usr/bin/env zsh
+
+CONJ_POD_NAME=$(kubectl get pods --namespace conj-ns -l "app=conjur-oss,release=helm-conjur" -o jsonpath="{.items[0].metadata.name}")
+kubectl logs $CONJ_POD_NAME -c conjur-oss -n conj-ns
+

@@ -1,0 +1,45 @@
+- !policy
+  id: conjur/authn-k8s/dev-cluster
+
+  body:
+    - !variable kubernetes/service-account-token
+    - !variable kubernetes/ca-cert
+    - !variable kubernetes/api-url
+
+    - !variable ca/cert
+    - !variable ca/key
+
+    - !webservice
+
+    - !group users
+
+    - !permit
+      role: !group users
+      privilege: [ read, authenticate ]
+      resource: !webservice
+
+- !host
+  id: secrets-provider-app
+  annotations:
+    authn-k8s/namespace: default
+    authn-k8s/service-account: secrets-provider-service-account
+    authn-k8s/authentication-container-name: cyberark-secrets-provider-for-k8s
+
+- !host
+  id: test-app
+  annotations:
+    authn-k8s/namespace: default
+    authn-k8s/service-account: test-app-sa
+
+- !grant
+  role: !group conjur/authn-k8s/dev-cluster/users
+  members:
+    - !host secrets-provider-app
+    - !host test-app
+
+- !variable password
+
+- !permit
+  role: !group conjur/authn-k8s/dev-cluster/users
+  privilege: [ read, execute ]
+  resource: !variable password

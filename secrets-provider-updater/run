@@ -1,0 +1,109 @@
+#!/usr/bin/env zsh
+
+CONJUR_NAMESPACE=conj-ns
+GOLDEN_CONFIG_NAMESPACE=cyberark-conjur
+DATA_KEY="$(docker run --rm cyberark/conjur data-key generate)"
+HELM_RELEASE=helm-conjur
+VERSION=2.0.3
+CONJUR_ACCOUNT=default
+SERVICE_ID=dev-cluster
+
+cleanup() {
+  helm uninstall secrets-provider
+  helm uninstall namespace-prep
+  helm uninstall -n cyberark-conjur cluster-prep
+  helm uninstall -n $CONJUR_NAMESPACE helm-conjur
+  rm -rf conjur-cert.pem
+  kubectl delete namespace $CONJUR_NAMESPACE
+  kubectl delete namespace $GOLDEN_CONFIG_NAMESPACE
+}
+
+cleanup
+
+set -e
+
+helm install --create-namespace -n "$CONJUR_NAMESPACE" --set dataKey="$DATA_KEY" --set authenticators="authn\,authn-k8s/$SERVICE_ID" "$HELM_RELEASE" cyberark/conjur-oss
+
+#kubectl wait service -n "$CONJUR_NAMESPACE" --for condition=Available=True --timeout=600s helm-conjur-conjur-oss-ingress
+#until kubectl get -n "$CONJUR_NAMESPACE" service/helm-conjur-conjur-oss-ingress --output=jsonpath='{.status.loadBalancer}' | grep "ingress"; do : ; done
+sleep 60
+
+# Gets details on the running conjur service (specifically the IP)
+# kubectl get svc -n $CONJUR_NAMESPACE -w helm-conjur-conjur-oss-ingress
+
+# Gets the name of the pod running conjur
+CONJ_POD_NAME=$(kubectl get pods --namespace $CONJUR_NAMESPACE -l "app=conjur-oss,release=helm-conjur" -o jsonpath="{.items[0].metadata.name}")
+
+# creates the account devorg in the conjur instance
+echo "Creating conjur account $CONJUR_ACCOUNT"
+kubectl exec -n $CONJUR_NAMESPACE $CONJ_POD_NAME --container=conjur-oss -- conjurctl account create $CONJUR_ACCOUNT
+#kubectl exec -n $CONJUR_NAMESPACE $CONJ_POD_NAME --container=conjur-oss -- conjurctl account create default
+kubectl exec -n $CONJUR_NAMESPACE $CONJ_POD_NAME -c conjur-oss -- conjurctl role retrieve-key "$CONJUR_ACCOUNT":user:admin
+
+API_KEY="$(kubectl exec -n $CONJUR_NAMESPACE $CONJ_POD_NAME -c conjur-oss -- conjurctl role retrieve-key "$CONJUR_ACCOUNT":user:admin)"
+
+token_header() {
+  # GETS an authorization token for the conjur server
+  TOKEN="$(curl --insecure --data $API_KEY --header "Accept-Encoding: base64" https://localhost/authn/$CONJUR_ACCOUNT/admin/authenticate)"
+
+  # Properly format token
+  TOKEN="Authorization: Token token=\"$TOKEN\""
+  echo "$TOKEN"
+}
+
+# Load the policy into the conjur server
+echo "Loading policy into Conjur root"
+token_header
+curl --insecure -H "$(token_header)" -X POST -d "$(< policy.yaml)" https://localhost/policies/$CONJUR_ACCOUNT/policy/root
+
+echo "Setting variable value"
+curl --insecure -H "$(token_header)" -w "%{http_code}\n" -d "super-secret" https://localhost/secrets/$CONJUR_ACCOUNT/variable/password
+
+###  CA CONFIGURATION
+echo "Configuring CA using Rake task"
+kubectl exec -n "$CONJUR_NAMESPACE" "$CONJ_POD_NAME" -c conjur-oss -- bash -c "CONJUR_ACCOUNT=$CONJUR_ACCOUNT && rake authn_k8s:ca_init[conjur/authn-k8s/$SERVICE_ID]"
+
+# Get the Conjur SSL certificate (stores in conur-cert.pem)
+yes | ./get_conjur_cert -d helm-conjur-conjur-oss -u https://localhost
+
+# Prep the cluster/initialize Golden Configmap
+helm install cluster-prep cyberark/conjur-config-cluster-prep \
+  --namespace $GOLDEN_CONFIG_NAMESPACE --create-namespace \
+  --set conjur.account="$CONJUR_ACCOUNT" \
+  --set conjur.applianceUrl="https://helm-conjur-conjur-oss.$CONJUR_NAMESPACE.svc.cluster.local" \
+  --set conjur.certificateBase64="$(base64 conjur-cert.pem)" \
+  --set authnK8s.authenticatorID="$SERVICE_ID" \
+  --set authnK8s.serviceAccount.name="authn-k8s-sa"
+
+### Configure Conjur secret values so Conjur can access K8s API
+TOKEN_SECRET_NAME="$(kubectl get secrets -n $GOLDEN_CONFIG_NAMESPACE | grep 'authn-k8s-sa.*service-account-token' | head -n1 | awk '{print $1}')"
+SA_TOKEN="$(kubectl get secret $TOKEN_SECRET_NAME -n $GOLDEN_CONFIG_NAMESPACE --output='go-template={{ .data.token }}' | base64 -D)"
+API_URL="$(kubectl config view --raw --minify --flatten --output='jsonpath={.clusters[].cluster.server}')"
+
+kubectl config view --raw --minify --flatten --output='jsonpath={.clusters[].cluster.certificate-authority-data}' | base64 -D > k8s-cluster-ca.pem
+K8S_CA_CERT="$(cat k8s-cluster-ca.pem)"
+
+# Set the three variable values in Conjur
+echo "Setting Conjur k8s authenticator variable values"
+curl --insecure -H "$(token_header)" -w "%{http_code}\n" --data "$SA_TOKEN" https://localhost/secrets/$CONJUR_ACCOUNT/variable/conjur%2Fauthn-k8s%2Fdev-cluster%2Fkubernetes%2Fservice-account-token
+curl --insecure -H "$(token_header)" -w "%{http_code}\n" --data "$API_URL" https://localhost/secrets/$CONJUR_ACCOUNT/variable/conjur%2Fauthn-k8s%2Fdev-cluster%2Fkubernetes%2Fapi-url
+curl --insecure -H "$(token_header)" -w "%{http_code}\n" --data "$K8S_CA_CERT" https://localhost/secrets/$CONJUR_ACCOUNT/variable/conjur%2Fauthn-k8s%2Fdev-cluster%2Fkubernetes%2Fca-cert
+
+echo "Prepping secrets provider install namespace"
+helm install namespace-prep cyberark/conjur-config-namespace-prep \
+  --namespace default \
+  --set conjurConfigMap.name="conjur-configmap" \
+  --set authnK8s.goldenConfigMap="conjur-configmap" \
+  --set authnK8s.namespace="$GOLDEN_CONFIG_NAMESPACE"
+
+echo "Loading Kubernetes secret into default namespace"
+kubectl apply -f secret.yaml
+# Gets Conjur's public SSL certificate
+#echo | openssl s_client -connect localhost:443 2>&1 | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' > cert.pem
+
+echo "Installing secrets provider"
+helm install secrets-provider cyberark/secrets-provider \
+  -f secrets-provider.yaml \
+  --set environment.conjur.conjurConnConfigMap=conjur-configmap \
+  --set environment.conjur.sslCertificate.value="$(< conjur-cert.pem)" \
+  -n default
