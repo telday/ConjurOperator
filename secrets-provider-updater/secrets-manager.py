@@ -3,6 +3,7 @@ import tempfile
 import os
 import subprocess
 
+import kubernetes
 import yaml
 import kopf
 import requests
@@ -47,8 +48,13 @@ def setup_helm_file(secret_name):
 def create_fn(body, **kwargs):
     secret_name = kwargs['meta']['name']
 
+    k8s_config = kubernetes.config.load_kube_config()
+    k8s_client = kubernetes.client.ApiClient()
+
     # Ensure that we have a conjur managed secret before running secrets provider
     if 'conjur-map' in body['data']:
-        sp_config_file = setup_helm_file(secret_name)
-        subprocess.run(['helm', 'upgrade', 'secrets-provider', 'secrets-provider', '--repo', 'https://cyberark.github.io/helm-charts', '-f', sp_config_file, '--reuse-values'])
-        os.unlink(sp_config_file)
+        #sp_config_file = setup_helm_file(secret_name)
+        #subprocess.run(['helm', 'upgrade', 'secrets-provider', 'secrets-provider', '--repo', 'https://cyberark.github.io/helm-charts', '-f', sp_config_file, '--reuse-values'])
+        #os.unlink(sp_config_file)
+        ret = kubernetes.utils.create_from_yaml(k8s_client, "secrets-provider-k8s.yaml", verbose=False)
+        print(type(ret[0]))
