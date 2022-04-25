@@ -91,19 +91,6 @@ curl --insecure -H "$(token_header)" -w "%{http_code}\n" --data "$K8S_CA_CERT" h
 
 echo "Prepping secrets provider install namespace"
 helm install namespace-prep cyberark/conjur-config-namespace-prep \
-  --namespace default \
   --set conjurConfigMap.name="conjur-configmap" \
   --set authnK8s.goldenConfigMap="conjur-configmap" \
   --set authnK8s.namespace="$GOLDEN_CONFIG_NAMESPACE"
-
-echo "Loading Kubernetes secret into default namespace"
-kubectl apply -f secret.yaml
-# Gets Conjur's public SSL certificate
-#echo | openssl s_client -connect localhost:443 2>&1 | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' > cert.pem
-
-echo "Installing secrets provider"
-helm install secrets-provider cyberark/secrets-provider \
-  -f secrets-provider.yaml \
-  --set environment.conjur.conjurConnConfigMap=conjur-configmap \
-  --set environment.conjur.sslCertificate.value="$(< conjur-cert.pem)" \
-  -n default

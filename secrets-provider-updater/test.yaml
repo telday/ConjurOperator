@@ -7,3 +7,11 @@ spec:
     - name: fedora
       image: fedora:latest
       command: ["sleep", "infinity"]
+      volumeMounts:
+        - name: secret
+          mountPath: "/etc/secret"
+          readOnly: true
+  volumes:
+    - name: secret
+      secret:
+        secretName: db-credentials
