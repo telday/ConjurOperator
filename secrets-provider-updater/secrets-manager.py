@@ -3,6 +3,7 @@ import tempfile
 import os
 import subprocess
 import functools
+import time
 
 import kubernetes
 import yaml
@@ -34,13 +35,23 @@ def get_k8s_client():
 
 @kopf.on.startup()
 def prep_namespace(*args, **kwargs):
-    print(args)
-    print(kwargs)
+    subprocess.run(['helm', 'install', 'namespace-prep', 'cyberark/conjur-config-namespace-prep', '-f', 'namespace-prep.yaml'])
+    k8s_client = get_k8s_client()
+    created_objects = kubernetes.utils.create_from_yaml(k8s_client, "manifests/secrets-provider-k8s.yaml", verbose=False)
 
 @kopf.on.cleanup()
 def cleanup_namespace(*args, **kwargs):
-    print('cleanup')
-    print(args, kwargs)
+    k8s_client = get_k8s_client()
+
+    core_v1_api = kubernetes.client.CoreV1Api(k8s_client)
+    rbac_v1_api = kubernetes.client.RbacAuthorizationV1Api(k8s_client)
+
+    core_v1_api.delete_namespaced_service_account('secrets-provider-service-account', 'default')
+    rbac_v1_api.delete_namespaced_role('secrets-provider-role', 'default')
+    rbac_v1_api.delete_namespaced_role_binding('secrets-provider-role-binding', 'default')
+
+    subprocess.run(['helm', 'delete', 'namespace-prep'])
+
 
 @kopf.on.create('secrets')
 def create_fn(body, **kwargs):
@@ -50,11 +61,16 @@ def create_fn(body, **kwargs):
 
     # Ensure that we have a conjur managed secret before running secrets provider
     if 'conjur-map' in body['data']:
-        kubernetes.utils.create_from_yaml(k8s_client, "secrets-provider-job.yaml", verbose=False)
+        kubernetes.utils.create_from_yaml(k8s_client, "manifests/secrets-provider-job.yaml", verbose=False)
 
 @kopf.on.field('jobs', field='spec.completions')
 def cleanup_job(body, **kwargs):
     job_name = body['metadata']['name']
+    # For some reason even though k8s API lists one completion for this job it isn't always quite dont yet
+    # A workaround for this could be to use the k8s watch api here to watch the created pod status before
+    # running cleanup
+    time.sleep(1)
+
     # TODO should check to make sure job ran successfully here
     if job_name == "secrets-provider":
         k8s_client = get_k8s_client()
@@ -67,4 +83,3 @@ def cleanup_job(body, **kwargs):
                 propagation_policy='Foreground',
                 grace_period_seconds=5
             ))
-        print(res)

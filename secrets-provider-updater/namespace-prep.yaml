@@ -1,0 +1,5 @@
+conjurConfigMap:
+  name: "conjur-configmap"
+authnK8s:
+  goldenConfigMap: "conjur-configmap"
+  namespace: "cyberark-conjur"

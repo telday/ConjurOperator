@@ -1,3 +1,4 @@
+---
 apiVersion: v1
 kind: Pod
 metadata:
@@ -15,3 +16,14 @@ spec:
     - name: secret
       secret:
         secretName: db-credentials
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-credentials
+type: Opaque
+data:
+  DBName:   bXlhcHBEQg==
+stringData:
+  conjur-map: |-   
+    password: password
