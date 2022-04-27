@@ -25,25 +25,6 @@ def get_conjur_client():
 
     return Client(connection_info, credentials_provider=provider, ssl_verification_mode=SslVerificationMode.INSECURE, async_mode=False)
 
-def setup_helm_file(secret_name):
-    # Get the helm template
-    with open('secrets-provider.yaml') as helm_file:
-        data = yaml.load(helm_file, Loader=yaml.Loader)
-
-    # Read in the cert file
-    with open('conjur-cert.pem') as cert_file:
-        cert = cert_file.read()
-
-    data['environment']['conjur']['sslCertificate']['value'] = cert
-    data['environment']['k8sSecrets'] = [secret_name]
-
-    file = tempfile.NamedTemporaryFile(mode='w+', delete=False)
-    # Could easily add more to this policy file but just keep it simple for this example
-    file.write(yaml.dump(data))
-    file.close()
-
-    return file.name
-
 @kopf.on.create('secrets')
 def create_fn(body, **kwargs):
     secret_name = kwargs['meta']['name']
@@ -53,8 +34,22 @@ def create_fn(body, **kwargs):
 
     # Ensure that we have a conjur managed secret before running secrets provider
     if 'conjur-map' in body['data']:
-        #sp_config_file = setup_helm_file(secret_name)
-        #subprocess.run(['helm', 'upgrade', 'secrets-provider', 'secrets-provider', '--repo', 'https://cyberark.github.io/helm-charts', '-f', sp_config_file, '--reuse-values'])
-        #os.unlink(sp_config_file)
-        ret = kubernetes.utils.create_from_yaml(k8s_client, "secrets-provider-k8s.yaml", verbose=False)
-        print(type(ret[0]))
+        kubernetes.utils.create_from_yaml(k8s_client, "secrets-provider-k8s.yaml", verbose=False)
+
+@kopf.on.field('jobs', field='spec.completions')
+def cleanup_job(body, **kwargs):
+    job_name = body['metadata']['name']
+    # TODO should check to make sure job ran successfully here
+    if job_name == "secrets-provider":
+        k8s_config = kubernetes.config.load_kube_config()
+        k8s_client = kubernetes.client.ApiClient()
+        batch_api = kubernetes.client.BatchV1Api(k8s_client)
+
+        res = batch_api.delete_namespaced_job(
+            name=job_name,
+            namespace="default",
+            body=kubernetes.client.V1DeleteOptions(
+                propagation_policy='Foreground',
+                grace_period_seconds=5
+            ))
+        print(res)
